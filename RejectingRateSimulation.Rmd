@@ -1,0 +1,350 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r Libraries}
+library(readxl)
+library(ggplot2)
+library(openxlsx)
+library(Matrix)
+library(progress)
+```
+
+```{r Functions}
+#___________________AR1_____________________________
+AR1 <- function(rho){
+  
+  rannums <- rnorm(256, mean = 0, sd = 1)
+  
+  #first 128 values are random
+  initial_nums<- rannums[1:128]
+  
+  #set the first ar1 number and begin the loop
+  ar1_nums <- numeric(128)
+  ar1_nums[1] <- rannums[129]
+  
+  for (t in 2:128){
+    
+    ar1_nums[t] <- rho*ar1_nums[t-1] +rannums[128+t]
+    
+  }
+  
+  final_series <- c(initial_nums,ar1_nums)
+  return(final_series)
+}
+
+AR1_withshifts <- function(rho,h,a){
+  
+  #h is how much we change the AR component rho, a is a value between 0 and 1 
+  #changing where the change happens in the time series
+  
+  rannums <- rnorm(256,mean = 0,sd = 1)
+  ar_series <- numeric(256)
+  ar_series[1] <- rannums[1]
+  
+  #first Ta values are ar1
+  for (t in 2:floor(256*a)){
+    ar_series[t] <- rannums[t] + rho*rannums[t-1]
+  }
+  
+  for (t in (floor(256*a)+1):256){
+    ar_series[t] <- rannums[t] + (rho+h)*rannums[t-1]
+  }
+  return(ar_series)
+}
+
+#________S_____________________
+S <- function(series,k, lag){
+  
+  if( lag <0 || lag >= length(series)){
+    stop("Invalid Lag")
+  }
+  
+  sum = 0
+  
+  #Sum over all products at this lag
+  for (t in 1:k){
+    sum = sum + (series[t]*series[t+lag])
+  }
+  
+  return(sum)
+}
+
+#______Huber-Phi Function________
+phi <- function(X,k){
+  output <- numeric(length(X))
+  for (i in 1:length(X)){
+    if (X[i] < -k){
+      output[i] <- -k
+    }
+    else if (abs(X[i]) <= k){
+      output[i] <- X[i]
+    }
+    else{
+      output[i] <- k
+    }
+  }
+  return(output)
+}
+
+#_____Transform_________________
+Y_hat <- function(X,k){
+  m <- mean(X)
+  sigma <- sd(X)
+  
+  Y_hat <- (X-m)/sigma
+  Y_hat <- phi(Y_hat,k)
+  
+  return(Y_hat)
+}
+
+#_________Test_Statistic______________
+R_T_1 <- function(Y,p){
+  
+  T_tilde <- length(Y) - p
+  R_T_atk <- as.numeric(T_tilde)
+  
+  #we should loop over all values of k we are choosing
+  for (k in 1:T_tilde){
+  
+  #first we should define our left and right vectors
+  V <- as.numeric(p)
+  for (i in 0:p){
+    temp <- S(Y, k, p)-(k/T_tilde)*S(Y,T_tilde,p)
+    V[i] <- temp
+  }
+  V <- as.matrix(V)
+  
+  #then the weight matrix
+  W = diag(p)
+  
+  #then calculate the final value at this choice of k
+  R_T_atk[k] <- t(V)%*%W%*%V
+  
+  }
+
+  #finally take the maximum of this list
+  R_T <- (1 / T) * max(R_T_atk)
+  
+  return(R_T)
+  
+}
+
+#_______Chat_GPT_R_T__________________
+R_T <- function(Y, p) {
+  T_tilde <- length(Y) - p
+  R_T_atk <- numeric(T_tilde)
+  
+  # Loop over all values of k we are choosing
+  for (k in 1:T_tilde) {
+    # Define our left and right vectors
+    V <- numeric(p + 1)
+    for (i in 0:p) {
+      temp <- S(Y, k, i) - (k / T_tilde) * S(Y, T_tilde, i)
+      V[i + 1] <- temp
+    }
+    V <- matrix(V, nrow = 1)
+    
+    # Weight matrix
+    W <- diag(p + 1)
+    
+    # Calculate the final value at this choice of k
+    R_T_atk[k] <- V %*% W %*% t(V)
+  }
+  
+  # Finally take the maximum of this list
+  R_T <- (1 / T_tilde) * max(R_T_atk)
+  
+  return(R_T)
+}
+
+```
+
+```{r Loading + Visualizing}
+dists <- read_excel("C:/Users/filli/OneDrive/Documents/R/simulation_results.xlsx")
+
+T128p3 <- dists$`T=128, p=3`
+
+# Create a data frame
+hist_df <- data.frame(T128p3 = T128p3)
+
+# Plot the histogram with density curve
+ggplot(data = hist_df, aes(x = T128p3)) +
+  geom_histogram(aes(y = ..density..), bins = 100, color = "black", fill = "blue", alpha = 0.5) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Tests Statistics for T=128, p=3",
+       x = "R",
+       y = "Density") +
+  theme_minimal()
+
+```
+
+```{r Estimating + Exporting}
+
+#Lets store these in a dataframe too
+p_list <- c()
+p_names <- c()
+
+for (i in 1:7){
+  
+  column <- dists[[i]]
+  column_name <- colnames(dists)[i]
+  
+  p_value <- quantile(column, prob=0.95)
+  
+  p_list <- append(p_list,p_value)
+  p_names <- append(p_names, column_name)
+  
+  
+  print(paste("p-value at",column_name,":",p_value))
+}
+
+p_frames_left <- as.data.frame( p_names)
+p_frame_right <- as.data.frame(p_list)
+p_frame <- cbind(p_frames_left,p_frame_right)
+
+#Export this dataframe as a spreadsheet
+write.xlsx(p_frame, "C://Users/filli/OneDrive/Documents/R/p_values_DF.xlsx")
+```
+
+```{r Testing Functions}
+#First let's examine the time series function
+time_series <- AR1(0.2)
+Y_series <- Y_hat(time_series,k=1.5)
+
+# create data
+xValue <- 1:256
+data <- data.frame(xValue,Y_series)
+
+# Plot
+ggplot(data, aes(x=xValue, y=Y_series)) +
+  geom_line()
+
+```
+
+
+```{r Rejection Rate}
+#Lets try doing this and see if it works
+power = numeric(7)
+
+outer_loop = 1
+for (rho in c(0,0.1,0.2,0.3,0.4,0.5,0.6,0.7)){
+reject_count = 0
+
+  
+  
+# Initialize the progress bar
+  pb <- progress_bar$new(
+    format = "  Progress [:bar] :percent",
+    total = 1000,
+    clear = FALSE,
+    width = 60
+  )
+  
+for (i in 1:1000){
+  
+  #let's generate our random values
+  ar1_process <- AR1(rho)
+  
+  #lets then standardize them
+  Y_hats <- Y_hat(ar1_process, k=1.5)
+  
+  #next we calculate our test statistic on this
+  test_statistic <- R_T(Y_hats,p=3)
+  
+  if (test_statistic >= p_frame[2,1]){
+
+    reject_count <- reject_count +1
+  }
+  
+  pb$tick()
+
+}
+
+print(paste("rejection rate at",rho,":",reject_count/1000))
+
+power[outer_loop] <- reject_count
+outer_loop <- outer_loop +1
+
+}
+
+```
+
+```{r Power of tests}
+#Okay so we I accidentally made this a cumulative thingy, so I think what I need to do is take the differences in reverse order
+power_fixed <- numeric(8)
+
+for (i in 0:6){
+  
+  power_fixed[8-i] <- power[8-i]-power[7-i]
+  
+}
+
+powers <- power_fixed*(1/1000)
+
+# create data
+xValue <- 1:8
+data <- data.frame(xValue,powers)
+
+# Plot
+ggplot(data, aes(x=rhos, y=powers)) +
+  geom_line()
+```
+
+```{r Rejection Rate based on size of shift, and location of shift}
+# Initialization
+rho <- 0
+h <- 0.6
+rejection_rates <- numeric(20)
+counter <- 1
+
+# Generate a sequence for 'a'
+a_values <- c(0, 0.05, 1)
+
+# Initialize the progress bar
+pb <- progress_bar$new(
+  format = "  Progress [:bar] :percent",
+  total = 1000 * length(a_values),
+  clear = FALSE,
+  width = 60
+)
+
+# Main loop
+for (a in a_values) {
+  # Generate the data
+  ar1_data <- AR1_withshifts(rho, a, h)
+  test_statistics <- numeric(1000)
+  
+  # Calculate 1000 test statistics
+  for (i in 1:1000) {
+    R_t <- R_T(Y = ar1_data, p = 1)
+    test_statistics[i] <- R_t
+    pb$tick()
+  }
+  
+  # Calculate and store the rejection rate
+  rejection_rates[counter] <- sum(test_statistics >= p_frame[2,1]) / 1000
+  counter <- counter + 1
+}
+
+# Display rejection rates
+print(rejection_rates)
+
+```
+
+```{r}
+print(rejection_rates)
+
+#create plots
+xValue <- range(c(0,0.05,1))
+data <- data.frame(xValue,rejection_rates)
+
+# Plot
+ggplot(data, aes(x=xValue, y=rejection_rates)) +
+  geom_line(color = "red") +       # Red line
+  geom_point(color = "red") +      # Red dots at each point
+  labs(x = "X Value", y = "Rejection Rates", title = "Rejection Rates per location of change") + 
+  theme_minimal()
+```
+

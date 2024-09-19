@@ -1,0 +1,436 @@
+---
+title: "Replicating Some Graphs"
+author: "Ronan Timon"
+date: "2024-06-19"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+Things to do:
+  - Replicate the results using the p-values we have.
+    This is Hcov1e, Hcov3e, Hcov5e
+    We do this for 7 values of rho, making 500            simulations of the AR(1) process
+```{r Packages}
+library(readxl)
+library(ggplot2)
+library(reshape2)
+library(openxlsx)
+library(Matrix)
+library(progress)
+```
+
+Here we create all necessary functions
+```{r Functions}
+AR1 <- function(rho){
+  
+  rannums <- rnorm(256, mean = 0, sd = 1)
+  
+  #first 128 values are random
+  initial_nums<- rannums[1:128]
+  
+  #set the first ar1 number and begin the loop
+  ar1_nums <- numeric(128)
+  ar1_nums[1] <- rho*rannums[128]+rannums[129]
+  
+  for (t in 2:128){
+    
+    ar1_nums[t] <- rho*ar1_nums[t-1] +rannums[128+t]
+    
+  }
+  
+  final_series <- c(initial_nums,ar1_nums)
+  return(final_series)
+}
+
+AR1_heavytail <- function(df){
+  
+  rannums <- rt(256, df)
+  
+  # First 128 values are all random
+  initial_nums <- rannums[1:128]
+  
+  # Set the first AR(1) number and begin the loop
+  ar1_nums <- numeric(128)
+  ar1_nums[1] <- 0.35 * initial_nums[128] + rannums[129]
+  
+  for (t in 2:128) {
+    ar1_nums[t] <- 0.35 * ar1_nums[t - 1] + rannums[128 + t]
+  }
+  
+  # Combine the initial random numbers and the AR(1) sequence
+  final_series <- c(initial_nums, ar1_nums)
+  return(final_series)
+}
+
+
+
+AR1_withshifts <- function(rho, h, a) {
+  
+  
+  set.seed(NULL)
+  # Ensure a is between 0 and 1
+  if (a < 0 || a > 1) {
+    stop("Parameter 'a' must be between 0 and 1")
+  }
+  
+  rannums <- rnorm(256, mean = 0, sd = 1)
+  ar_series <- numeric(256)
+  ar_series[1] <- rannums[1]
+  
+  # First part of the series with original rho
+  for (t in 2:floor(256 * a)) {
+    
+    ar_series[t] <- rannums[t] + rho * ar_series[t - 1]
+  }
+  
+  # Remaining part of the series with adjusted rho
+  for (t in (floor(256 * a) + 1):256) {
+    ar_series[t] <- rannums[t] + (rho + h) * ar_series[t - 1]
+  }
+  
+  if (any(is.na(ar_series))) {
+    stop("NA values detected in ar_series")
+  }
+  
+  return(ar_series)
+}
+
+
+#________S_____________________
+S <- function(series,k, lag){
+  
+  if( lag <0 || lag >= length(series)){
+    stop("Invalid Lag")
+  }
+  
+  sum = 0
+  
+  #Sum over all products at this lag
+  for (t in 1:k){
+    sum = sum + (series[t]*series[t+lag])
+  }
+  
+  return(sum)
+}
+
+#______Huber-Phi Function________
+phi <- function(X,k){
+  output <- numeric(length(X))
+  for (i in 1:length(X)){
+    if (X[i] < -k){
+      output[i] <- -k
+    }
+    else if (abs(X[i]) <= k){
+      output[i] <- X[i]
+    }
+    else{
+      output[i] <- k
+    }
+  }
+  return(output)
+}
+
+#_____Transform_________________
+Y_hat <- function(X,k){
+  m <- mean(X)
+  sigma <- sd(X)
+  
+  Y_hat <- (X-m)/sigma
+  Y_hat <- phi(Y_hat,k)
+  
+  return(Y_hat)
+}
+
+#_________Test_Statistic______________
+R_T_1 <- function(Y,p){
+  
+  T_tilde <- length(Y) - p
+  R_T_atk <- as.numeric(T_tilde)
+  
+  #we should loop over all values of k we are choosing
+  for (k in 1:T_tilde){
+  
+  #first we should define our left and right vectors
+  V <- as.numeric(p)
+  for (i in 0:p){
+    temp <- S(Y, k, p)-(k/T_tilde)*S(Y,T_tilde,p)
+    V[i] <- temp
+  }
+  V <- as.matrix(V)
+  
+  #then the weight matrix
+  W = diag(p)
+  
+  #then calculate the final value at this choice of k
+  R_T_atk[k] <- t(V)%*%W%*%V
+  
+  }
+
+  #finally take the maximum of this list
+  R_T <- (1 / T) * max(R_T_atk)
+  
+  return(R_T)
+  
+}
+
+#_______Chat_GPT_R_T__________________
+R_T <- function(Y, p) {
+  T_tilde <- length(Y) - p
+  R_T_atk <- numeric(T_tilde)
+  
+  # Loop over all values of k we are choosing
+  for (k in 1:T_tilde) {
+    # Define our left and right vectors
+    V <- numeric(p + 1)
+    for (i in 0:p) {
+      temp <- S(Y, k, i) - (k / T_tilde) * S(Y, T_tilde, i)
+      V[i + 1] <- temp
+    }
+    V <- matrix(V, nrow = 1)
+    
+    # Weight matrix
+    W <- diag(p + 1)
+    
+    # Calculate the final value at this choice of k
+    R_T_atk[k] <- V %*% W %*% t(V)
+  }
+  
+  # Finally take the maximum of this list
+  R_T <- (1 / T_tilde) * max(R_T_atk)
+  
+  return(R_T)
+}
+```
+
+```{r Loading in p-values}
+p_frame <- read.xlsx("C://Users/filli/OneDrive/Documents/R/p_values_DF.xlsx")
+
+```
+
+_____________________________AR(1) Graph from paper_________________________
+```{r Power Estimation}
+#make an empty dataframe
+power_df <- data.frame(matrix(nrow=3,ncol=7))
+row.names(power_df) = c('p=1', 'p=2', 'p=3')
+colnames(power_df) <- seq(0,0.6,by=0.1)
+
+# Initialize the progress bar
+  pb <- progress_bar$new(
+    format = "  Progress [:bar] :percent",
+    total = 1000*7*3,
+    clear = FALSE,
+    width = 60
+  )
+
+delay <- 1 #initiate the delay at 1 and increase it every time, not to be mistaken for p_value
+#we loop over the different choices of p
+for (p in p_frame[1:3, 2]){
+  rho_counter = 1
+  #run simulations for different choices of rho
+for (rho in seq(0,0.6, by = 0.1)){
+  print(paste("Running with delay:",delay," and rho:",rho))
+  reject_count <- 0
+#create a loop with 1000 iterations
+for (iter in 1:1000){
+  
+#generate an AR1 sequence 
+#let's generate our random values
+  ar1_process <- AR1(rho)
+  
+  #lets then standardize them
+  Y_hats <- Y_hat(ar1_process, k=1.5)
+  
+  #next we calculate our test statistic on this
+  test_statistic <- R_T(Y_hats,p=delay)
+  
+  if (test_statistic >= p){
+
+    reject_count <- reject_count +1
+  }
+    pb$tick()
+  
+}
+  rejection_rate <- reject_count/1000 #calculate the rejection rate here and store it in our dataframe
+  power_df[delay,rho_counter] <- rejection_rate#store it in the relevent part of the dataframe
+  rho_counter <- rho_counter + 1
+}
+  delay <- delay +1
+}
+```
+
+```{r graphs by rho}
+# Add a row_number column to the dataframe
+df <- cbind(power_df, row_number = c('p=1', 'p=3', 'p=5'))
+
+# Melt the dataframe
+df_melt <- melt(df, id = "row_number")
+
+# Create the plot
+ggplot(df_melt, aes(x = variable, y = value, color = row_number, group = row_number)) + 
+  geom_line() + 
+  geom_point() +
+  labs(title = "Power Estimation", x = "Rho", y = "Power", color = "P values") +
+  theme_minimal()
+
+```
+
+___________________________AR(1) heavytail from paper________________________________________
+```{r}
+# Make an empty dataframe
+ht_power_df <- data.frame(matrix(nrow=3, ncol=10))
+row.names(ht_power_df) <- c('p=1', 'p=2', 'p=3')
+colnames(ht_power_df) <- seq(1, 10, by = 1)
+
+# Initialize the progress bar
+pb <- progress_bar$new(
+  format = "  Progress [:bar] :percent",
+  total = 1000 * 10 * 3,
+  clear = FALSE,
+  width = 60
+)
+
+delay <- 1 # initiate the delay at 1 and increase it every time, not to be mistaken for p_value
+
+# Loop over the different choices of p
+for (p in 1:3) {
+  df_counter <- 1 # reset the df_counter for each p
+  # Run simulations for different choices of degrees of freedom
+  for (df in seq(1, 10, by = 1)) {
+    print(paste("Running with delay:", delay, " and degrees:", df))
+    reject_count <- 0
+    
+    # Create a loop with 1000 iterations
+    for (iter in 1:1000) {
+      # Generate an AR1 sequence
+      ar1_process_ht <- AR1_heavytail(df)
+      
+      # Standardize them
+      Y_hats <- Y_hat(ar1_process_ht, k = 1.5)
+      
+      # Calculate the test statistic on this
+      test_statistic <- R_T(Y_hats, p = delay)
+      
+      if (test_statistic >= p_frame[p, 2]) {
+        reject_count <- reject_count + 1
+      }
+      
+      pb$tick()
+    }
+    
+    # Calculate the rejection rate and store it in the dataframe
+    rejection_rate <- reject_count / 1000
+    ht_power_df[delay, df_counter] <- rejection_rate # Store it in the relevant part of the dataframe
+    df_counter <- df_counter + 1 # Increment df_counter for the next degrees of freedom
+  }
+  delay <- delay + 1
+}
+
+```
+
+```{r}
+# Add a row_number column to the dataframe
+df <- cbind(ht_power_df, row_number = c('p=1', 'p=3', 'p=5'))
+
+# Melt the dataframe
+df_melt <- melt(df, id = "row_number")
+
+# Create the plot
+ggplot(df_melt, aes(x = variable, y = value, color = row_number, group = row_number)) + 
+  geom_line() + 
+  geom_point() +
+  labs(title = "Power Estimation", x = "df", y = "Power", color = "P values") +
+  theme_minimal()
+
+
+```
+
+____________________________Giorgios point of change graph_______________________________
+```{r power estimation by point of change}
+#we fix our change h
+rho = 0.1
+h=0.6
+
+#we should initialize an empty dataframe
+#make an empty dataframe
+power_at_change_df <- data.frame(matrix(nrow=3,ncol=9))
+row.names(power_df) = c('p=1', 'p=3', 'p=5')
+colnames(power_at_change_df) <- seq(0.1,0.9,by=0.1)
+
+# Initialize the progress bar
+  pb <- progress_bar$new(
+    format = "  Progress [:bar] :percent",
+    total = 3*9*1000,
+    clear = FALSE,
+    width = 60
+  )
+
+delay <- 1 #use this for indexing our rows
+
+#we want to make a graph for the 3 test statistics we have
+for (p_value in p_frame[4:6, 2]){
+  #now we vary over  a, the point of change
+  
+  change_point <- 1 #we use this to index our columns
+  
+  for (a in seq(0.1,0.9,by=0.1)){
+    #reset our counter
+    reject_count <- 0
+    
+    #we run our test 1000 times now
+    for (iter in 1:1000){
+      
+      #generate our AR sequence with change at a
+      ar_series <- AR1_withshifts(rho,h,a)
+      ar_standardized <- Y_hat(ar_series,k=1.5)
+      
+      #get our test statistic
+      #next we calculate our test statistic on this
+      test_statistic <- R_T(ar_standardized,p=delay)
+      #check if we reject the null hypothesis
+     if (test_statistic >= p_value){
+        reject_count <- reject_count +1
+     }
+      
+      pb$tick()
+    }
+    rejection_rate <- reject_count/1000
+    print (paste("rejection rate for delay",delay,"at point",a*256,"is:",rejection_rate))
+    
+    #we actually need to write the values into our dataframe here
+    print(paste("indexing is:",delay, change_point))
+    power_at_change_df[delay,change_point] <- rejection_rate
+    
+    change_point <- change_point + 1
+  }
+ 
+  delay <- delay + 1 
+}
+```
+
+```{r Graphs for Giorgio}
+# Assuming power_at_change_df is your dataframe with 3 rows and 10 columns (change_point 0.1 to 1)
+
+# Add a column for row names to use as a variable in the plot
+power_at_change_df$TestStatistic <- c('p=1', 'p=3', 'p=5')
+
+# Melt the dataframe
+df_melt <- melt(power_at_change_df, id.vars = "TestStatistic")
+
+# Rename columns for better readability
+colnames(df_melt) <- c("TestStatistic", "ChangePoint", "RejectionRate")
+
+# Convert ChangePoint to numeric
+df_melt$ChangePoint <- as.numeric(as.character(df_melt$ChangePoint))
+
+# Plot
+ggplot(df_melt, aes(x = ChangePoint, y = RejectionRate, colour = TestStatistic, group = TestStatistic)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Rejection Rate by Point of Change",
+       x = "Change Point (a)",
+       y = "Rejection Rate",
+       colour = "Test Statistic") +
+  theme_minimal()
+
+```

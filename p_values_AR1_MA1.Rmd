@@ -1,0 +1,280 @@
+---
+title: "p-values, power for models"
+output: html_notebook
+---
+
+To do:
+-Estimate p-values for the columns we have
+-generate an AR(1) and MA(1) model
+-show power for different values of rho and delay
+
+```{r}
+library(readxl)
+library(ggplot2)
+library(openxlsx)
+library(Matrix)
+library(progress)
+library(reticulate)
+```
+
+```{r Functions}
+#________S_____________________
+S <- function(series,k, lag){
+  
+  if( lag <0 || lag >= length(series)){
+    stop("Invalid Lag")
+  }
+  
+  sum = 0
+  
+  #Sum over all products at this lag
+  for (i in 1:(length(series)-lag)){
+    sum = sum + (series[i]*series[i+lag])
+  }
+  
+  return(sum)
+}
+
+#______Huber-Phi Function________
+phi <- function(X,k){
+  output <- numeric(length(X))
+  for (i in 1:length(X)){
+    if (X[i] < -k){
+      output[i] <- -k
+    }
+    else if (abs(X[i]) <= k){
+      output[i] <- X[i]
+    }
+    else{
+      output[i] <- k
+    }
+  }
+  return(output)
+}
+
+#_____Transform_________________
+Y_hat <- function(X,k){
+  m <- mean(X)
+  sigma <- sd(X)
+  
+  Y_hat <- (X-m)/sigma
+  Y_hat <- phi(Y_hat,k)
+}
+
+#____________kernel____________
+kernel <- function(x) {
+  if (abs(x) <= 0.5) {
+    return(1)
+  } 
+  else if (0.5 < abs(x) && abs(x) <= 1) {
+    return(2 - 2 * abs(x))
+  } 
+  else {
+    return(0)
+  }
+}
+#_________sigma_hat________________
+sigma_ij <- function(i,j,series,T,p,b){
+  
+  T_tilde <- (T-p)
+  summation <- 0
+  
+  for (t in 1:T_tilde){
+    
+    t_temp <- (series[t]*series[t+j] - (1/T_tilde)*S(series,j,T_tilde))
+    
+    for (s in 1:T_tilde){
+      
+      s_temp <- (series[s]*series[s+i] - (1/T_tilde)*S(series,i,T_tilde))
+      
+      summation = summation + (t_temp)*(s_temp)*(kernel((s-t)/b))
+      
+    }
+  }
+  return((1/T)*summation)
+}
+
+
+weight_matrix <- function(letter, p, series, T, b) {
+  # Takes 'e' for 1s in the diagonal
+  # 'd' for descending values in the diagonal
+  # 's' for entries from kernel-based long-run variance estimator (this one may take the longest)
+  
+  if(letter == "e") {
+    W <- diag(p + 1)
+  } else if(letter == "d") {
+    w <- numeric(p + 1)
+    for(i in 1:(p + 1)) {
+      w[i] <- 1 - (i / p)
+    }
+    W <- diag(w)
+  } else if(letter == "s") {
+    w <- numeric(p + 1)
+    for(i in 1:(p + 1)) {
+      w[i] <- sigma_ij(i, i, series, T, p, b) 
+    }
+    W <- diag(w)
+  } else {
+    stop("Invalid letter input. Choose 'e', 'd', or 's'.")
+  }
+  
+  return(W)
+}
+
+
+#_____________Test_Statistic______________
+R_T <- function(Y, p,W) {
+  T_tilde <- length(Y) - p
+  R_T_atk <- numeric(T_tilde)
+  
+  # Loop over all values of k we are choosing
+  for (k in 1:T_tilde) {
+    # Define our left and right vectors
+    V <- numeric(p + 1)
+    for (i in 0:p) {
+      temp <- S(Y, k, i) - (k / T_tilde) * S(Y, T_tilde, i)
+      V[i + 1] <- temp
+    }
+    V <- matrix(V, nrow = 1)
+    
+    # Calculate the final value at this choice of k
+    R_T_atk[k] <- V %*% W %*% t(V)
+  }
+  
+  # Finally take the maximum of this list
+  R_T <- (1 / T_tilde) * max(R_T_atk)
+  
+  return(R_T)
+}
+
+
+#___________Models_______________________
+AR1_withshifts <- function(rho,h,a){
+  
+  #h is how much we change the AR component rho, a is a value between 0 and 1 
+  #changing where the change happens in the time series
+  
+  rannums <- rnorm(256,mean = 0,sd = 1)
+  ar_series <- numeric(256)
+  ar_series[1] <- rannums[1]
+  
+  #first Ta values are ar1
+  for (t in 2:floor(256*a)){
+    ar_series[t] <- rannums[t] + rho*rannums[t-1]
+  }
+  
+  for (t in (floor(256*a)+1):256){
+    ar_series[t] <- rannums[t] + (rho+h)*rannums[t-1]
+  }
+  return(ar_series)
+}
+
+```
+
+```{r Unpickling}
+# Specify the path to your Python executable
+use_python("C:/Users/filli/anaconda3/python.exe", required = TRUE)
+
+# Import python modules
+pickle <- import("pickle")
+
+# import pythons open function using reticulate
+py_open <- import_builtins()$open
+
+# Load the pickle file
+result <- pickle$load(py_open("C:/Users/filli/Cusum_sim/progress.pkl", "rb"))
+
+# Extract the DataFrame and the count from the tuple
+df <- result[[1]]   # The first element of the tuple is the DataFrame
+count <- result[[2]] # The second element of the tuple is the count
+
+# Convert the Python DataFrame to an R DataFrame
+df <- py_to_r(df)
+
+# Now you have the DataFrame in 'df' and the count in 'count'
+print(df)
+print(count)
+
+```
+
+```{r estimating p-values}
+# Initialize an empty vector to store the p-values
+p_values <- numeric(3)
+p_names <- c("p=1", "p=3", "p=5")
+
+for (i in 1:3) {
+  
+  # Extract the data for the current p
+  data <- df[, i]
+  
+  # Remove NA values
+  data <- na.omit(data)
+  
+  # Find the 95th percentile
+  p_value <- quantile(data, 0.95)
+  
+  # Store the 95th percentile in the p_values vector
+  p_values[i] <- p_value
+}
+
+# Create a data frame with p-values and appropriate row names
+p_values_df <- data.frame(p_values, row.names = p_names)
+
+# Print the resulting data frame
+print(p_values_df)
+
+```
+
+```{r AR(1) rho}
+#Run simulations for p=3 first
+power_AR1 <- numeric(8)  
+
+outer_loop <- 1
+p <- 3
+p_value <- p_values_df[2,]
+
+for (h in c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7)) {
+  reject_count <- 0
+  
+  # Initialize the progress bar
+  pb <- progress_bar$new(
+    format = "  Progress [:bar] :percent",
+    total = 1000,
+    clear = FALSE,
+    width = 60
+  )
+  
+  for (i in 1:1000) {
+    # Generate AR1 process with shifts
+    ar1_process <- AR1_withshifts(0, h, a = 0.5)
+    
+    # Standardize the AR1 process
+    Y_hats <- Y_hat(ar1_process, k = 1.5)
+    T <- length(Y_hats)
+    
+    # Calculate the test statistic
+    W <- weight_matrix("e", p, Y_hats, b = (T - p)^(1/3))
+    test_statistic <- R_T(Y_hats, p,W)
+    
+    # Check if the test statistic exceeds the threshold
+    if (test_statistic >= p_value) {
+      reject_count <- reject_count + 1
+    }
+    
+    pb$tick()
+  }
+  
+  rejection_rate <- reject_count / 1000
+  print(paste("Rejection rate at h =", h, ":", rejection_rate))
+  
+  power_AR1[outer_loop] <- rejection_rate  # Store rejection rate
+  outer_loop <- outer_loop + 1
+}
+
+
+```
+
+```{r MA(1) rho}
+
+```
+

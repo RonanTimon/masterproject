@@ -1,0 +1,748 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+ 
+```{r Functions}
+#________S_____________________
+S <- function(series,k, lag){
+  
+  if( lag <0 || lag >= length(series)){
+    stop("Invalid Lag")
+  }
+  
+  sum = 0
+  
+  #Sum over all products at this lag
+  for (i in 1:(length(series)-lag)){
+    sum = sum + (series[i]*series[i+lag])
+  }
+  
+  return(sum)
+}
+
+#______Huber-Phi Function________
+phi <- function(X,k){
+  output <- numeric(length(X))
+  for (i in 1:length(X)){
+    if (X[i] < -k){
+      output[i] <- -k
+    }
+    else if (abs(X[i]) <= k){
+      output[i] <- X[i]
+    }
+    else{
+      output[i] <- k
+    }
+  }
+  return(output)
+}
+
+#_____Transform_________________
+Y_hat <- function(X,k){
+  m <- mean(X)
+  sigma <- sd(X)
+  
+  Y_hat <- (X-m)/sigma
+  Y_hat <- phi(Y_hat,k)
+}
+
+#____________kernel____________
+kernel <- function(x) {
+  if (abs(x) <= 0.5) {
+    return(1)
+  } 
+  else if (0.5 < abs(x) && abs(x) <= 1) {
+    return(2 - 2 * abs(x))
+  } 
+  else {
+    return(0)
+  }
+}
+#_________sigma_hat________________
+sigma_ij <- function(i,j,series,T,p,b){
+  
+  T_tilde <- (T-p)
+  summation <- 0
+  
+  for (t in 1:T_tilde){
+    
+    t_temp <- (series[t]*series[t+j] - (1/T_tilde)*S(series,j,T_tilde))
+    
+    for (s in 1:T_tilde){
+      
+      s_temp <- (series[s]*series[s+i] - (1/T_tilde)*S(series,i,T_tilde))
+      
+      summation = summation + (t_temp)*(s_temp)*(kernel((s-t)/b))
+      
+    }
+  }
+  return((1/T)*summation)
+}
+
+
+weight_matrix <- function(letter, p, series, T, b) {
+  # Takes 'e' for 1s in the diagonal
+  # 'd' for descending values in the diagonal
+  # 's' for entries from kernel-based long-run variance estimator (this one may take the longest)
+  
+  if(letter == "e") {
+    W <- diag(p + 1)
+  } else if(letter == "d") {
+    w <- numeric(p + 1)
+    for(i in 1:(p + 1)) {
+      w[i] <- 1 - (i / p)
+    }
+    W <- diag(w)
+  } else if(letter == "s") {
+    w <- numeric(p + 1)
+    for(i in 1:(p + 1)) {
+      w[i] <- sigma_ij(i, i, series, T, p, b) 
+    }
+    W <- diag(w)
+  } else {
+    stop("Invalid letter input. Choose 'e', 'd', or 's'.")
+  }
+  
+  return(W)
+}
+
+
+#_____________Test_Statistic______________
+R_tilde <- function(V, W, T_tilde, T) {
+  # Initialize the result list to store test statistics
+  R_list <- numeric(T_tilde)
+  
+  # Begin calculating the test statistic
+  for (k in 1:T_tilde) {
+    # Calculate the first part of the test statistic
+    V_sum_k <- colSums(V[1:k, , drop = FALSE])
+    V_sum_T_tilde <- colSums(V[1:T_tilde, , drop = FALSE])
+    
+    V_hat <- V_sum_k - (k / T_tilde) * V_sum_T_tilde
+    
+    # Ensure V_hat is a row vector (1-row matrix) for matrix multiplication
+    V_hat <- matrix(V_hat, nrow = 1)
+    
+    # Calculate the test statistic
+    test_t <- V_hat %*% W %*% t(V_hat)
+    
+    # Store the test statistic
+    R_list[k] <- test_t
+  }
+  
+  # Calculate the final test statistic
+  R_T <- (1 / T) * max(R_list)
+  
+  return(R_T)
+}
+
+#_________________Simulation__________________
+simulation <- function(T,p,iterations){
+  # Step 1: Generate independent standard normal variables
+  T_tilde <- T - p
+
+  # Initialize the list to store test statistics
+  test_statistics <- numeric(iterations)
+
+  # Main loop
+  for (i in 1:iterations) {
+    rannum <- rnorm((p + 1) * T_tilde)
+    Z <- matrix(rannum, nrow = T_tilde, ncol = p + 1)
+  
+    # Step 2: Generate sigma and use it to find V
+    b <- (T_tilde)^(1/3)
+    sigma_hat <- matrix(NA, nrow = p + 1, ncol = p + 1)
+  
+  for (i in 1:(p + 1)) {
+    for (j in 1:(p + 1)) {
+      sigma_hat[i, j] <- sigma_ij(i, j, rannum, T, p, b)
+    }
+  }
+  
+  # Find the nearest positive definite matrix
+  nearest_pd_matrix <- nearPD(sigma_hat)
+  pd_matrix <- nearest_pd_matrix$mat
+  L <- chol(pd_matrix)
+  
+  V <- Z %*% L
+  V <- as.array(V)
+  
+  # Step 3: Calculate the weighted test statistic
+  
+  W <- diag(p + 1)
+  result <- R_tilde(V, W, T_tilde, T)
+  test_statistics[iteration] <- result
+  
+  }
+  return(test_statistics)
+}
+
+
+#______________Run_Simulations_____________________
+run_simulation <- function(T, p, num_iterations,weight_l, weight_params) {
+  #weight_params should be a list containing series, T, and b in that order
+  
+  T_tilde <- T - p
+  
+  # Initialize the list to store test statistics
+  test_statistics <- numeric(num_iterations)
+  
+  # Initialize the progress bar
+  pb <- progress_bar$new(
+    format = "  Progress [:bar] :percent",
+    total = num_iterations,
+    clear = FALSE,
+    width = 60
+  )
+  
+  # Main loop
+  for (iteration in 1:num_iterations) {
+    rannum <- rnorm((p + 1) * T_tilde)
+    Z <- matrix(rannum, nrow = T_tilde, ncol = p + 1)
+    
+    # Step 2: Generate sigma and use it to find V
+    b <- (T - p)^(1/3)
+    sigma_hat <- matrix(NA, nrow = p + 1, ncol = p + 1)
+    
+    for (i in 1:(p + 1)) {
+      for (j in 1:(p + 1)) {
+        sigma_hat[i, j] <- sigma_ij(i, j, rannum, T, p, b)
+      }
+    }
+    
+    # Find the nearest positive definite matrix
+    nearest_pd_matrix <- nearPD(sigma_hat)
+    pd_matrix <- nearest_pd_matrix$mat
+    L <- chol(pd_matrix)
+    
+    V <- Z %*% L
+    V <- as.array(V)
+    
+    #calculate R, do this differently if given weight params
+    if (is.null(weight_params)){
+      W <- weight_matrix(weight_l, p)
+    }
+    elseif(!is.null(weight_params)){
+      W <- weight_matrix(weight_l,p,weight_params[1],weight_params[2],weight_params[3])      
+    }
+    
+    
+    # Step 3: Calculate the weighted test statistic
+    result <- R_tilde(V, W, T_tilde, T)
+    test_statistics[iteration] <- result
+    
+    # Update the progress bar
+    pb$tick()
+  }
+  
+  return(test_statistics)
+}
+```
+ 
+```{r}
+library(Matrix)
+library(stats)
+library(progress)
+library(openxlsx)
+```
+
+```{r Defining T, p and Z}
+T <- 128
+p <- 3
+
+rho = 0.8
+
+#define our time series here
+ran_values <- rnorm(128)
+AR1_series<- numeric((T-p)*(p+1))
+
+AR1_series[1:128] <- ran_values
+
+for (t in 129:((T-p)*(p+1))){
+  AR1_series[t] <- rho*AR1_series[t-1] +rnorm(1)  
+}
+
+#We should normalize our function here
+Y_hat <- Y_hat(AR1_series, k=1.5)
+
+#Now we want to force these into our matrix Z
+Z <- matrix(Y_hat, nrow=(T-p), ncol=p+1)
+
+
+
+```
+
+```{r}
+#Now we try to generate our matrix sigma 
+b = (T-p)**(1/3)
+sigma_hat <- matrix(NA,nrow=(p+1),ncol=(p+1))
+
+for (i in 1:(p+1)){
+  for (j in 1:(p+1)){
+    sigma_hat[i,j] <- sigma_ij(i,j,Y_hat,T,p,b)
+  }
+}
+```
+
+```{r}
+# Find the nearest positive definite matrix
+nearest_pd_matrix <- nearPD(sigma_hat)
+
+# Extract the positive definite matrix
+pd_matrix <- nearest_pd_matrix$mat
+
+L = chol(pd_matrix);
+V = Z %*% L;
+V = as.array(V);
+```
+
+```{r}
+W = diag(p+1)
+
+result <- R_tilde(V, W, T_tilde, T)
+print(result)
+```
+
+```{r Algorithm}
+#We do the above process but now we loop over different values of rho and T
+
+for (rho in c(0,0.8)){
+  
+  for (T in c(128,256,512)){
+    
+    #Step 1: Define and time series and make matrix Z
+    
+    p <- 3
+
+    rho = 0.8
+
+    #define our time series here
+    ran_values <- rnorm(128)
+    AR1_series<- numeric((T-p)*(p+1))
+
+    AR1_series[1:128] <- ran_values
+
+    for (t in 129:((T-p)*(p+1))){
+      AR1_series[t] <- rho*AR1_series[t-1] +rnorm(1)  
+    }
+
+    #We should normalize our function here
+    Y_hat <- Y_hat(AR1_series, k=1.5)
+
+    #Now we want to force these into our matrix Z
+    Z <- matrix(Y_hat, nrow=(T-p), ncol=p+1)
+
+    #Step two: Find Matrix Sigma_hat
+    b = (T-p)**(1/3)
+    sigma_hat <- matrix(NA,nrow=(p+1),ncol=(p+1))
+
+    for (i in 1:(p+1)){
+      for (j in 1:(p+1)){
+        sigma_hat[i,j] <- sigma_ij(i,j,Y_hat,T,p,b)
+      }
+    }
+    
+    #Step three: Find the Cholesky Decomposition L and define V
+    
+    # Find the nearest positive definite matrix
+    nearest_pd_matrix <- nearPD(sigma_hat)
+
+    #Extract the positive definite matrix
+    pd_matrix <- nearest_pd_matrix$mat
+
+    L = chol(pd_matrix);
+    V = Z %*% L;
+    V = as.array(V);
+    
+    #Final Step: Compute test statistic and display results
+    W = diag(p+1)
+    result <- R_tilde(V, W, T_tilde, T)
+    print(paste("At T=",T,"and rho=",rho,"R_hat gives",result))
+  }
+  
+}
+
+```
+
+```{r}
+#________S_____________________
+S <- function(series, k, lag){
+  if (lag < 0 || lag >= length(series)){
+    stop("Invalid Lag")
+  }
+  
+  sum = 0
+  # Sum over all products at this lag
+  for (i in 1:(length(series) - lag)){
+    sum = sum + (series[i] * series[i + lag])
+  }
+  return(sum)
+}
+
+#______Huber-Phi Function________
+phi <- function(X, k){
+  output <- numeric(length(X))
+  for (i in 1:length(X)){
+    if (X[i] < -k){
+      output[i] <- -k
+    } else if (abs(X[i]) <= k){
+      output[i] <- X[i]
+    } else {
+      output[i] <- k
+    }
+  }
+  return(output)
+}
+
+#_____Transform_________________
+Y_hat_function <- function(X, k){
+  m <- mean(X)
+  sigma <- sd(X)
+  
+  Y_hat <- (X - m) / sigma
+  Y_hat <- phi(Y_hat, k)
+  return(Y_hat)
+}
+
+#____________kernel____________
+kernel <- function(x) {
+  if (abs(x) <= 0.5) {
+    return(1)
+  } else if (0.5 < abs(x) && abs(x) <= 1) {
+    return(2 - 2 * abs(x))
+  } else {
+    return(0)
+  }
+}
+
+#_________sigma_hat________________
+sigma_ij <- function(i, j, series, T, p, b){
+  T_hat <- (T - p)
+  summation <- 0
+  
+  for (t in 1:T_hat){
+    t_temp <- (series[t] * series[t + j] - (1 / T_hat) * S(series, j, T_hat))
+    for (s in 1:T_hat){
+      s_temp <- (series[s] * series[s + i] - (1 / T_hat) * S(series, i, T_hat))
+      summation = summation + (t_temp) * (s_temp) * (kernel((s - t) / b))
+    }
+  }
+  return((1 / T) * summation)
+}
+
+#_____________Test_Statistic______________
+R_tilde <- function(V, W, T_tilde, T) {
+  R_list <- numeric(T_tilde)
+  for (k in 1:T_tilde) {
+    V_sum_k <- colSums(V[1:k, , drop = FALSE])
+    V_sum_T_tilde <- colSums(V[1:T_tilde, , drop = FALSE])
+    V_hat <- V_sum_k - (k / T_tilde) * V_sum_T_tilde
+    V_hat <- matrix(V_hat, nrow = 1)
+    test_t <- V_hat %*% W %*% t(V_hat)
+    R_list[k] <- test_t
+  }
+  R_T <- (1 / T) * max(R_list)
+  return(R_T)
+}
+
+# Loop over different values of rho and T
+for (rho in c(0, 0.8)){
+  for (T in c(128, 256, 512)){
+    # Step 1: Define and time series and make matrix Z
+    p <- 3
+    # rho is already defined in the loop condition, no need to redefine it
+    # define our time series here
+    ran_values <- rnorm(128)
+    AR1_series <- numeric((T - p) * (p + 1))
+    AR1_series[1:128] <- ran_values
+    for (t in 129:((T - p) * (p + 1))){
+      AR1_series[t] <- rho * AR1_series[t - 1] + rnorm(1)  
+    }
+    
+    # Normalize our function here
+    Y_hat_values <- Y_hat_function(AR1_series, k = 1.5)
+    
+    # Now we want to force these into our matrix Z
+    Z <- matrix(Y_hat_values, nrow = (T - p), ncol = p + 1)
+    
+    # Step two: Find Matrix Sigma_hat
+    b <- (T - p)^(1/3)
+    sigma_hat <- matrix(NA, nrow = (p + 1), ncol = (p + 1))
+    for (i in 1:(p + 1)){
+      for (j in 1:(p + 1)){
+        sigma_hat[i, j] <- sigma_ij(i, j, Y_hat_values, T, p, b)
+      }
+    }
+    
+    # Step three: Find the Cholesky Decomposition L and define V
+    nearest_pd_matrix <- nearPD(sigma_hat)
+    pd_matrix <- nearest_pd_matrix$mat
+    L <- chol(pd_matrix)
+    V <- Z %*% L
+    V <- as.array(V)
+    
+    # Final Step: Compute test statistic and display results
+    W <- diag(p + 1)
+    T_tilde <- T - p
+    result <- R_tilde(V, W, T_tilde, T)
+    print(paste("At T =", T, "and rho =", rho, "R_hat gives", result))
+  }
+}
+
+```
+
+```{r}
+#Step 1: Generate independent standard normal variabels
+T = 128
+p = 3
+
+T_tilde = T-p
+
+
+#We do this 1000 times and store the values in a list for later
+test_statistics <- numeric(1000)
+
+for (i in 1:1000){
+  rannum= rnorm((p+1)*(T_tilde))
+
+  Z <- matrix(rannum, nrow=(T_tilde), ncol=(p+1))
+  
+  #Step 2: Generate sigma and use to find V
+  b = (T-p)**(1/3)
+  sigma_hat <- matrix(NA,nrow=(p+1),ncol=(p+1))
+  for (i in 1:(p+1)){
+    for (j in 1:(p+1)){
+      sigma_hat[i,j] <- sigma_ij(i,j,rannum,T,p,b)
+    }
+  }
+  # Find the nearest positive definite matrix
+  nearest_pd_matrix <- nearPD(sigma_hat)
+
+  # Extract the positive definite matrix
+  pd_matrix <- nearest_pd_matrix$mat
+
+  L = chol(pd_matrix);
+  V = Z %*% L;
+  V = as.array(V);
+  #Step 3: Calculate the weighted test statistic
+  W = diag(p+1)
+
+  result <- R_tilde(V, W, T_tilde, T)
+  test_statistics[i] = result
+}
+```
+
+```{r}
+
+
+# Define your functions: S, phi, Y_hat, kernel, sigma_ij, and R_tilde
+# Make sure these are correctly defined and available in your environment
+
+# Step 1: Generate independent standard normal variables
+T <- 128
+p <- 3
+T_tilde <- T - p
+
+# Initialize the list to store test statistics
+test_statistics <- numeric(1000)
+
+# Initialize the progress bar
+pb <- progress_bar$new(
+  format = "  Progress [:bar] :percent in :elapsed",
+  total = 1000,
+  clear = FALSE,
+  width = 60
+)
+
+# Main loop
+for (iteration in 1:1000) {
+  rannum <- rnorm((p + 1) * T_tilde)
+  Z <- matrix(rannum, nrow = T_tilde, ncol = p + 1)
+  
+  # Step 2: Generate sigma and use it to find V
+  b <- (T - p)^(1/3)
+  sigma_hat <- matrix(NA, nrow = p + 1, ncol = p + 1)
+  
+  for (i in 1:(p + 1)) {
+    for (j in 1:(p + 1)) {
+      sigma_hat[i, j] <- sigma_ij(i, j, rannum, T, p, b)
+    }
+  }
+  
+  # Find the nearest positive definite matrix
+  nearest_pd_matrix <- nearPD(sigma_hat)
+  pd_matrix <- nearest_pd_matrix$mat
+  L <- chol(pd_matrix)
+  
+  V <- Z %*% L
+  V <- as.array(V)
+  
+  # Step 3: Calculate the weighted test statistic
+  W <- diag(p + 1)
+  result <- R_tilde(V, W, T_tilde, T)
+  test_statistics[iteration] <- result
+  
+  # Update the progress bar
+  pb$tick()
+}
+
+# Print the resulting test statistics
+print(test_statistics)
+
+```
+
+```{r}
+output <- #make an empty with 9 columns and 1000 rows
+counter = 1
+  
+for(T in c(128,256,512)){
+  for(p in c(1,3,5)){
+    
+    # Initialize the progress bar
+  pb <- progress_bar$new(
+  format = "  Progress [:bar] :percent in :elapsed",
+  total = 1000,
+  clear = FALSE,
+  width = 60
+  )
+  
+  temp_results <- simulation(T,p,1000)
+  
+  #add these results to column no. counter
+  
+  #Change the name of this column to (T=,p=)
+  
+  counter <- counter +1 
+  
+  pb$tick()
+    
+  }
+}
+
+#Finally export this dataframe as a spreadsheet
+
+```
+
+```{r}
+# Define your functions: S, phi, Y_hat, kernel, sigma_ij, and R_tilde
+# Make sure these are correctly defined and available in your environment
+
+# Initialize an empty dataframe with 1000 rows and 9 columns
+output <- data.frame(matrix(nrow = 1000, ncol = 9))
+
+counter <- 1
+
+for (T in c(128, 256, 512)) {
+  for (p in c(1, 3, 5)) {
+    
+    # Initialize the progress bar
+    pb <- progress_bar$new(
+      format = "  Progress [:bar] :percent",
+      total = 1000,
+      clear = FALSE,
+      width = 60
+    )
+    
+    # Run the simulation
+    temp_results <- run_simulation(T, p, 1000)
+    
+    # Add these results to the column number counter
+    output[, counter] <- temp_results
+    
+    # Change the name of this column to (T=,p=)
+    colnames(output)[counter] <- paste0("T=", T, ", p=", p)
+    
+    counter <- counter + 1
+    
+    pb$tick()
+    
+  }
+}
+
+# Export this dataframe as a spreadsheet
+write.xlsx(output, "simulation_results.xlsx")
+
+```
+
+```{r}
+# Export this dataframe as a spreadsheet
+write.xlsx(output, "C://Users/filli/OneDrive/Documents/R/simulation_results.xlsx")
+```
+
+```{r}
+# Define your functions: S, phi, Y_hat, kernel, sigma_ij, and R_tilde
+# Make sure these are correctly defined and available in your environment
+
+# Open our existing dataframe
+output <- read.xlsx("C://Users/filli/OneDrive/Documents/R/simulation_results.xlsx")
+
+
+counter <- 8
+T=512
+
+for (p in c(3, 5)) {
+    
+  # Run the simulation
+  temp_results <- run_simulation(T, p, 1000)
+  
+  # Add these results to the column number counter
+  output[, counter] <- temp_results
+  
+  # Change the name of this column to (T=,p=)
+  colnames(output)[counter] <- paste0("T=", T, ", p=", p)
+  
+  counter <- counter + 1
+  
+  pb$tick()
+  
+}
+
+
+```
+
+```{r}
+```{r}
+# Define your functions: S, phi, Y_hat, kernel, sigma_ij, and R_tilde
+# Make sure these are correctly defined and available in your environment
+
+# Initialize an empty dataframe with 1000 rows and 9 columns
+output <- data.frame(matrix(nrow = 1000, ncol = 27))
+
+for (T in c(100,300,500)){
+  
+  for(letter in c("e","d","s")){
+    
+    for(p in c(1,3,5){
+      
+      #initialize progress bar
+      # Initialize the progress bar
+    pb <- progress_bar$new(
+      format = "  Progress [:bar] :percent",
+      total = 1000,
+      clear = FALSE,
+      width = 60
+    )
+      #run this simulation
+    if (letter != "s"){
+      temp_results <- run_simulation(T, p, 1000,letter)
+    }
+    elif(letter = "s"){
+      temp_results <- run_simulations(T,p,1000,letter,weight_params=c())
+    }
+
+      #add results to output df
+      
+    pb$tick()
+
+    }
+    
+  }
+  
+}
+
+# Export this dataframe as a spreadsheet
+write.xlsx(output, "simulation_results2.xlsx")
+
+```
+```
