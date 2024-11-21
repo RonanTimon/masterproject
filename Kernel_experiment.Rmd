@@ -1,0 +1,201 @@
+---
+title: "Kernel Method"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+library(Matrix)
+library(stats)
+library(progress)
+library(openxlsx)
+library(profvis)
+library(ggplot2)
+library(comprehenr)
+
+source("~/R/MT_code/functions/load_functions.R")
+load_functions()
+
+AR_gamma <- function(l) {
+  output <- (a^(abs(l))) / (1 - a^2)
+  return(output)
+}
+
+MA_gamma <- function(l){
+  if(l==0){
+    return(1)
+  }
+  if(abs(l)==1){
+    return(a)
+  }
+  else{
+    return(0)
+  }
+}
+
+frobenius_norm <- function(A, B) {
+  return(sqrt(sum((A - B)^2)))  # Squared differences, sum, and sqrt
+}
+```
+
+
+```{r density curve of errors}
+######### Store results for different p #########
+p_values <- c(1, 2, 3)
+results <- list()
+
+total_iterations <- length(p_values) * 100  # Total trials for progress bar
+pb <- txtProgressBar(min = 0, max = total_iterations, style = 3)  # Create progress bar
+current_iteration <- 0  # Counter for progress
+
+for (p in p_values) {
+  matrix_norm_list <- c()
+  for (trial in 1:100) {
+    # Define LCR_matrix
+    LCR_matrix <- matrix(nrow = p + 1, ncol = p + 1)
+    for (i in 0:p) {
+      for (j in 0:p) {
+        LCR_matrix[i + 1, j + 1] <- sum(sapply(0:100, function(h) {
+          AR_gamma(h) * AR_gamma(h + j - i) + AR_gamma(h + j) * AR_gamma(h - i)
+        }))
+      }
+    }
+
+    ######### Estimate the covariance using the kernel method #########
+    AR_process <- AR1_withshifts(h = a, rho = 0, a = 1)
+    normalized_AR <- Y_hat(AR_process, k = 1.5)
+
+    sigma_hat <- matrix(nrow = p + 1, ncol = p + 1)
+    for (i in 0:p) {
+      for (j in 0:p) {
+        sigma_hat[i + 1, j + 1] <- sigma_ij(i, j, normalized_AR, p, b = 0.9*T^(1/3))
+      }
+    }
+
+    # Calculate Frobenius norm
+    dishtance <- frobenius_norm(LCR_matrix, sigma_hat)
+    
+    # Append to the list
+    matrix_norm_list <- c(matrix_norm_list, dishtance)
+    
+    # Update progress bar
+    current_iteration <- current_iteration + 1
+    setTxtProgressBar(pb, current_iteration)
+  }
+  
+  # Store the results for this p
+  results[[as.character(p)]] <- matrix_norm_list
+}
+
+# Close progress bar
+close(pb)
+
+######### Plot Density Curves #########
+plot(NULL, xlim = c(0, max(unlist(results))), ylim = c(0, 2), 
+     xlab = "Frobenius Norm", ylab = "Density", 
+     main = "Density Curves of Frobenius Norms for Different p")
+
+colors <- c("red", "blue", "green")  # Assign colors for each p
+for (i in seq_along(p_values)) {
+  p <- p_values[i]
+  density_curve <- density(results[[as.character(p)]])
+  lines(density_curve, col = colors[i], lwd = 2)
+}
+
+legend("topright", legend = paste("p =", p_values), col = colors, lwd = 2)
+
+```
+
+
+```{r MA density curve for errors}
+######### Store results for different p #########
+p_values <- c(1, 2, 3)
+results <- list()
+
+total_iterations <- length(p_values) * 100  # Total trials for progress bar
+pb <- txtProgressBar(min = 0, max = total_iterations, style = 3)  # Create progress bar
+current_iteration <- 0  # Counter for progress
+
+for (p in p_values) {
+  matrix_norm_list <- c()
+  for (trial in 1:100) {
+    # Define LCR_matrix
+    LCR_matrix <- matrix(nrow = p + 1, ncol = p + 1)
+    for (i in 0:p) {
+      for (j in 0:p) {
+        LCR_matrix[i + 1, j + 1] <- sum(sapply(0:100, function(h) {
+          MA_gamma(h) * MA_gamma(h + j - i) + MA_gamma(h + j) * MA_gamma(h - i)
+        }))
+      }
+    }
+
+    ######### Estimate the covariance using the kernel method #########
+    a=0.8
+    r=0
+    c=0
+    
+    MA_process <- MA1_withshifts(r,a,c)
+    normalized_MA <- Y_hat(MA_process, k = 1.5)
+
+    sigma_hat <- matrix(nrow = p + 1, ncol = p + 1)
+    for (i in 0:p) {
+      for (j in 0:p) {
+        sigma_hat[i + 1, j + 1] <- sigma_ij(i, j, normalized_MA, p, b = 0.9*T^(1/3))
+      }
+    }
+
+    # Calculate Frobenius norm
+    dishtance <- frobenius_norm(LCR_matrix, sigma_hat)
+    
+    # Append to the list
+    matrix_norm_list <- c(matrix_norm_list, dishtance)
+    
+    # Update progress bar
+    current_iteration <- current_iteration + 1
+    setTxtProgressBar(pb, current_iteration)
+  }
+  
+  # Store the results for this p
+  results[[as.character(p)]] <- matrix_norm_list
+}
+
+# Close progress bar
+close(pb)
+
+######### Plot Density Curves #########
+plot(NULL, xlim = c(0, max(unlist(results))), ylim = c(0, 2), 
+     xlab = "Frobenius Norm", ylab = "Density", 
+     main = "Density Curves of Frobenius Norms for Different p")
+
+colors <- c("red", "blue", "green")  # Assign colors for each p
+for (i in seq_along(p_values)) {
+  p <- p_values[i]
+  density_curve <- density(results[[as.character(p)]])
+  lines(density_curve, col = colors[i], lwd = 2)
+}
+
+legend("topright", legend = paste("p =", p_values), col = colors, lwd = 2)
+```
+
+
+```{r graph}
+######### Plot Density Curves #########
+plot(NULL, xlim = c(0, max(unlist(results))), ylim = c(0, 3), 
+     xlab = "Error (Frobenius Norm)", ylab = "Density", 
+     main = "Error rate of kernel estimator for p")
+
+colors <- c("red", "blue", "green")  # Assign colors for each p
+for (i in seq_along(p_values)) {
+  p <- p_values[i]
+  density_curve <- density(results[[as.character(p)]])
+  lines(density_curve, col = colors[i], lwd = 2)
+}
+
+legend("topright", legend = paste("p =", p_values), col = colors, lwd = 2)
+```
+
+```{r df for export}
+results_df <- as.data.frame(results)
+```
+
